@@ -38,15 +38,14 @@ class MouseController:
         self.prev_screen_x = self.screen_width // 2
         self.prev_screen_y = self.screen_height // 2
 
-        # Rolling position history to eliminate downward drift when clicking
-        self.pos_history = deque(maxlen=10)
-        self.frozen_cursor_pos: Optional[Tuple[int, int]] = None
-
         # State tracking for clicks and double clicks
         self.last_left_click_time = 0.0
         self.last_right_click_time = 0.0
         self.pinch_start_time: Optional[float] = None
         self.pinch_start_frame_pos: Optional[Tuple[int, int]] = None
+
+        # Pre-click snapshot: the screen position captured the moment pinch begins
+        self.click_target_pos: Optional[Tuple[int, int]] = None
 
         # State tracking for drag-and-drop
         self.is_dragging = False
@@ -64,7 +63,8 @@ class MouseController:
         # Current action description for HUD
         self.last_action_desc = "Idle"
 
-    def map_to_screen(self, frame_x: int, frame_y: int) -> Tuple[int, int]:
+    def map_to_screen(self, frame_x: int, frame_y: int,
+                      smoothing_override: Optional[float] = None) -> Tuple[int, int]:
         """
         Maps camera coordinates to screen coordinates with center-relative sensitivity scaling.
         Guarantees reaching all 4 screen edges and corners without hands leaving the camera box.
@@ -96,7 +96,7 @@ class MouseController:
         target_x = max(0, min(self.screen_width - 1, target_x))
         target_y = max(0, min(self.screen_height - 1, target_y))
 
-        alpha = config.CURSOR_SMOOTHING
+        alpha = smoothing_override if smoothing_override is not None else config.CURSOR_SMOOTHING
         smooth_x = int(alpha * target_x + (1.0 - alpha) * self.prev_screen_x)
         smooth_y = int(alpha * target_y + (1.0 - alpha) * self.prev_screen_y)
 
@@ -105,10 +105,11 @@ class MouseController:
 
         return smooth_x, smooth_y
 
-    def move_cursor(self, frame_x: int, frame_y: int, is_pinch_intent: bool = False) -> None:
+    def move_cursor(self, frame_x: int, frame_y: int, pinch_distance: float = 999.0) -> None:
         """
         Moves cursor smoothly across the desktop.
-        Locks cursor position during click intent and post-drop stabilization window.
+        Uses soft slowdown when fingers are approaching pinch to reduce drift,
+        but never fully freezes the cursor so it remains responsive.
         """
         # Post-drop stabilization: hold position while fingers separate so item isn't dragged away
         if time.time() < self.drop_cooldown_until:
@@ -119,57 +120,45 @@ class MouseController:
                     pass
             return
 
-        smooth_x, smooth_y = self.map_to_screen(frame_x, frame_y)
-
-        if not is_pinch_intent:
-            self.pos_history.append((smooth_x, smooth_y))
-            self.frozen_cursor_pos = None
-            try:
-                pyautogui.moveTo(smooth_x, smooth_y)
-                self.last_action_desc = f"Move -> ({smooth_x}, {smooth_y})"
-            except Exception as e:
-                logger.debug(f"Cursor move error: {e}")
+        # Soft slowdown: as fingers approach pinch, increase smoothing to reduce drift
+        # but never fully freeze - the cursor keeps tracking, just more sluggishly
+        if pinch_distance < config.PINCH_INTENT_DISTANCE:
+            # Linearly interpolate smoothing from normal (0.35) down to heavy (0.12)
+            # as distance goes from PINCH_INTENT_DISTANCE down to PINCH_THRESHOLD
+            t = max(0.0, (pinch_distance - config.PINCH_THRESHOLD) /
+                    max(1.0, config.PINCH_INTENT_DISTANCE - config.PINCH_THRESHOLD))
+            slow_alpha = 0.10 + t * (config.CURSOR_SMOOTHING - 0.10)
+            smooth_x, smooth_y = self.map_to_screen(frame_x, frame_y, smoothing_override=slow_alpha)
         else:
-            if self.frozen_cursor_pos is None:
-                if len(self.pos_history) >= 4:
-                    self.frozen_cursor_pos = self.pos_history[-4]
-                elif len(self.pos_history) > 0:
-                    self.frozen_cursor_pos = self.pos_history[0]
-                else:
-                    self.frozen_cursor_pos = (smooth_x, smooth_y)
+            smooth_x, smooth_y = self.map_to_screen(frame_x, frame_y)
 
-                try:
-                    pyautogui.moveTo(*self.frozen_cursor_pos)
-                except Exception:
-                    pass
-
-            self.last_action_desc = "Target Locked (Click Intent)"
+        try:
+            pyautogui.moveTo(smooth_x, smooth_y)
+            self.last_action_desc = f"Move -> ({smooth_x}, {smooth_y})"
+        except Exception as e:
+            logger.debug(f"Cursor move error: {e}")
 
     def handle_pinch_index(self, frame_x: int, frame_y: int) -> str:
         """
         Handles Thumb + Index pinch gesture:
-        - If dragging: moves held item across screen; tracks last stable position.
+        - On first frame of pinch: snapshot current cursor position as click target.
+        - If dragging: moves held item across screen with heavy smoothing.
         - If not dragging: evaluates duration and displacement to initiate drag mode.
-        - Stationary pinch: keeps target locked for clicking.
+        - Stationary pinch: holds cursor at snapshot position for clean click.
         """
         now = time.time()
         self.drag_release_counter = 0
 
         if self.pinch_start_time is None:
+            # FIRST FRAME OF PINCH: snapshot the current cursor position immediately
             self.pinch_start_time = now
             self.pinch_start_frame_pos = (frame_x, frame_y)
-            if self.frozen_cursor_pos is None:
-                if len(self.pos_history) >= 4:
-                    self.frozen_cursor_pos = self.pos_history[-4]
-                else:
-                    self.frozen_cursor_pos = (self.prev_screen_x, self.prev_screen_y)
-            try:
-                pyautogui.moveTo(*self.frozen_cursor_pos)
-            except Exception:
-                pass
+            self.click_target_pos = (self.prev_screen_x, self.prev_screen_y)
 
         if self.is_dragging:
-            sx, sy = self.map_to_screen(frame_x, frame_y)
+            # During drag: use heavier smoothing to eliminate jiggle
+            sx, sy = self.map_to_screen(frame_x, frame_y,
+                                        smoothing_override=config.DRAG_SMOOTHING)
             self.last_drag_screen_pos = (sx, sy)
             try:
                 pyautogui.moveTo(sx, sy)
@@ -188,10 +177,17 @@ class MouseController:
 
         # Transition to drag if held beyond threshold and moved deliberately
         if duration >= config.DRAG_ACTIVATION_TIME and dist_moved >= config.DRAG_START_DISTANCE:
+            # Start drag from the click target position (where cursor was when pinch began)
+            if self.click_target_pos:
+                try:
+                    pyautogui.moveTo(*self.click_target_pos)
+                except Exception:
+                    pass
             try:
                 pyautogui.mouseDown(button='left')
                 self.is_dragging = True
-                sx, sy = self.map_to_screen(frame_x, frame_y)
+                sx, sy = self.map_to_screen(frame_x, frame_y,
+                                            smoothing_override=config.DRAG_SMOOTHING)
                 self.last_drag_screen_pos = (sx, sy)
                 self.last_action_desc = "Drag Started (Holding Item)"
                 logger.info("Mouse down: Drag started")
@@ -199,9 +195,10 @@ class MouseController:
                 logger.error(f"Drag start error: {e}")
             return self.last_action_desc
 
-        if self.frozen_cursor_pos:
+        # While holding pinch but not yet dragging: keep cursor locked at click target
+        if self.click_target_pos:
             try:
-                pyautogui.moveTo(*self.frozen_cursor_pos)
+                pyautogui.moveTo(*self.click_target_pos)
             except Exception:
                 pass
 
@@ -211,7 +208,7 @@ class MouseController:
         """
         Called when pinch ends or opens.
         - While dragging: locks cursor to drop target before releasing mouse button so item drops accurately.
-        - If stationary: executes Single Left Click or Double Click.
+        - If stationary: executes Single Left Click or Double Click at the snapshot position.
         """
         now = time.time()
         action = ""
@@ -222,7 +219,8 @@ class MouseController:
                 if self.drag_release_counter < config.DRAG_RELEASE_GRACE_FRAMES:
                     # In grace period: track position but don't drop yet
                     if frame_x > 0 and frame_y > 0:
-                        sx, sy = self.map_to_screen(frame_x, frame_y)
+                        sx, sy = self.map_to_screen(frame_x, frame_y,
+                                                    smoothing_override=config.DRAG_SMOOTHING)
                         self.last_drag_screen_pos = (sx, sy)
                         try:
                             pyautogui.moveTo(sx, sy)
@@ -249,16 +247,20 @@ class MouseController:
             self.drag_release_counter = 0
             self.pinch_start_time = None
             self.pinch_start_frame_pos = None
-            self.frozen_cursor_pos = self.last_drag_screen_pos
-            self.drop_cooldown_until = now + 0.30  # Freeze cursor for 300ms while fingers open
+            self.click_target_pos = None
+            # Lock cursor at drop point and freeze for 300ms
+            if self.last_drag_screen_pos:
+                self.prev_screen_x, self.prev_screen_y = self.last_drag_screen_pos
+            self.drop_cooldown_until = now + 0.30
             self.last_action_desc = action
             return action
 
         # If not dragging, evaluate click
         if self.pinch_start_time is not None:
-            if self.frozen_cursor_pos:
+            # Move cursor to click target before clicking
+            if self.click_target_pos:
                 try:
-                    pyautogui.moveTo(*self.frozen_cursor_pos)
+                    pyautogui.moveTo(*self.click_target_pos)
                 except Exception:
                     pass
 
@@ -285,7 +287,7 @@ class MouseController:
                     logger.error(f"Single left click error: {e}")
                 self.last_left_click_time = now
 
-        self.frozen_cursor_pos = None
+        self.click_target_pos = None
         self.last_action_desc = action or self.last_action_desc
         return action
 
@@ -418,7 +420,7 @@ class MouseController:
 
         self.pinch_start_time = None
         self.pinch_start_frame_pos = None
-        self.frozen_cursor_pos = None
+        self.click_target_pos = None
         self.last_drag_screen_pos = None
         self.drop_cooldown_until = 0.0
         self.scroll_anchor = None

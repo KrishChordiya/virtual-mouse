@@ -116,8 +116,9 @@ class GestureRecognizer:
 
         # 7. Scroll Mode: Dual fingers UP (Index + Middle UP, Ring DOWN, Pinky DOWN, separated)
         # CRITICAL GUARD: Must NOT be pinching Thumb to Middle (which is Right Click)
+        # CRITICAL GUARD 2: Must NOT have thumb approaching middle (right click intent)
         if fingers["index"] and fingers["middle"] and not fingers["ring"] and not fingers["pinky"]:
-            if d_thumb_middle >= config.PINCH_MIDDLE_THRESHOLD and d_thumb_index >= config.PINCH_THRESHOLD:
+            if d_thumb_middle >= config.PINCH_MIDDLE_INTENT and d_thumb_index >= config.PINCH_THRESHOLD:
                 if d_index_middle > config.FINGER_CLOSE_THRESHOLD:
                     return GestureType.SCROLL_DUAL, info
 

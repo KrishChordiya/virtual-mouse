@@ -22,19 +22,21 @@ CURSOR_SENSITIVITY = 1.35     # Multiplier to reach screen edges with compact ha
 # Mouse Movement Smoothing
 # EMA factor: new_pos = SMOOTHING_FACTOR * raw_pos + (1 - SMOOTHING_FACTOR) * prev_pos
 CURSOR_SMOOTHING = 0.35
+DRAG_SMOOTHING = 0.18         # Heavier smoothing during drag to prevent jiggle
 
 # Gesture Distance Thresholds (in pixel coordinates on 640x480 frame)
 PINCH_THRESHOLD = 36          # Thumb to Index distance to register left click/drag
 PINCH_MIDDLE_THRESHOLD = 45   # Thumb to Middle distance to register right click
+PINCH_MIDDLE_INTENT = 65      # Thumb approaching middle - suppress scroll to allow right click
 PINCH_MAINTAIN_THRESHOLD = 52 # Relaxed distance to maintain drag while hand moves
-PINCH_INTENT_DISTANCE = 62    # Distance below which click intent is recognized and cursor freezes
+PINCH_INTENT_DISTANCE = 48    # Distance below which cursor starts slowing (soft freeze)
 FINGER_CLOSE_THRESHOLD = 40   # Distance to consider two fingertips together
 
 # Timing & Cooldowns (in seconds)
-CLICK_COOLDOWN = 0.35         # Minimum delay between successive single clicks
-DOUBLE_CLICK_WINDOW = 0.45    # Time window between taps for a double click
-DRAG_ACTIVATION_TIME = 0.35   # Pinch hold duration to start drag mode
-DRAG_START_DISTANCE = 18      # Pixel displacement required to trigger drag mode
+CLICK_COOLDOWN = 0.25         # Minimum delay between successive single clicks
+DOUBLE_CLICK_WINDOW = 0.55    # Time window between taps for a double click
+DRAG_ACTIVATION_TIME = 0.40   # Pinch hold duration to start drag mode (raised to avoid accidental drag)
+DRAG_START_DISTANCE = 20      # Pixel displacement required to trigger drag mode
 DRAG_RELEASE_GRACE_FRAMES = 6 # Frame tolerance buffer before dropping item
 
 # Continuous Scrolling Parameters

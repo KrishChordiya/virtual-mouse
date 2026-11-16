@@ -50,7 +50,13 @@ class VirtualMouseApp:
             self.camera.release()
             sys.exit(1)
 
-        cv2.namedWindow("Gesture-Controlled Virtual Mouse", cv2.WINDOW_AUTOSIZE)
+        self.win_name = "Gesture-Controlled Virtual Mouse"
+        cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.win_name, 520, 390)
+        try:
+            cv2.setWindowProperty(self.win_name, cv2.WND_PROP_TOPMOST, 1)
+        except Exception as e:
+            logger.debug(f"Could not set TOPMOST window property: {e}")
 
         try:
             self._main_loop()
@@ -60,6 +66,14 @@ class VirtualMouseApp:
     def _main_loop(self) -> None:
         """Processes video frames continuously until user quits."""
         while True:
+            # Check if user closed the window with the 'X' button
+            try:
+                if cv2.getWindowProperty(self.win_name, cv2.WND_PROP_VISIBLE) < 1:
+                    logger.info("Window close button clicked.")
+                    break
+            except Exception:
+                pass
+
             success, frame = self.camera.read_frame()
             if not success or frame is None:
                 logger.warning("Frame acquisition dropped. Retrying...")
@@ -89,69 +103,12 @@ class VirtualMouseApp:
                 ix, iy = info.get("index_pos", (0, 0))
                 hx, hy = info.get("hand_center_pos", (ix, iy))
 
-                if gesture == GestureType.NEUTRAL:
-                    self.mouse.reset_all_states()
-                    self.system.reset_volume_anchor()
-                    self.system.reset_brightness_anchor()
-                    self.was_pinching_index = False
-                    action_label = "Neutral: Operations Cleared / Dropped"
-
-                elif gesture == GestureType.MOVE:
-                    pinch_intent = info.get("pinch_intent", False)
-                    self.mouse.move_cursor(ix, iy, is_pinch_intent=pinch_intent)
-                    action_label = self.mouse.last_action_desc
-
-                elif gesture == GestureType.PINCH_INDEX:
-                    self.was_pinching_index = True
-                    action_label = self.mouse.handle_pinch_index(ix, iy)
-
-                elif gesture == GestureType.PINCH_MIDDLE:
-                    # Single Right Click
-                    action_label = self.mouse.handle_right_click()
-
-                elif gesture == GestureType.SCROLL_DUAL:
-                    action_label = self.mouse.handle_scroll(ix, iy)
-                    if self.mouse.scroll_anchor:
-                        active_reticle = (
-                            self.mouse.scroll_anchor,
-                            (ix, iy),
-                            "Scroll",
-                            config.SCROLL_DEADZONE,
-                            "Tilt UP/DOWN to scroll continuously"
-                        )
-
-                elif gesture == GestureType.MULTI_SELECT:
-                    action_label = self.mouse.set_multi_select(True, ix, iy)
-
-                elif gesture == GestureType.VOLUME_CONTROL:
-                    # Continuous Rate-Based Volume Joystick
-                    vol, v_desc = self.system.adjust_volume_continuous(hx, hy)
-                    action_label = v_desc
-                    slider_info = ("VOLUME", int(vol), config.COLOR_SUCCESS)
-                    if self.system.volume_anchor:
-                        active_reticle = (
-                            self.system.volume_anchor,
-                            (hx, hy),
-                            "Volume",
-                            config.CONTROL_DEADZONE,
-                            "Tilt UP for Volume UP / DOWN for Volume DOWN"
-                        )
-
-                elif gesture == GestureType.BRIGHTNESS_CONTROL:
-                    # Continuous Rate-Based Brightness Joystick
-                    bri, b_desc = self.system.adjust_brightness_continuous(hx, hy)
-                    action_label = b_desc
-                    slider_info = ("BRIGHTNESS", bri, config.COLOR_WARNING)
-                    if self.system.brightness_anchor:
-                        active_reticle = (
-                            self.system.brightness_anchor,
-                            (hx, hy),
-                            "Brightness",
-                            config.CONTROL_DEADZONE,
-                            "Tilt UP for Brightness UP / DOWN for Brightness DOWN"
-                        )
-
-                # Release handlers when exiting specific gestures
+                # ──────────────────────────────────────────────────────────
+                # PRIORITY: Handle drag release BEFORE any other gesture
+                # When dragging and pinch opens, we must NOT let MOVE/etc
+                # move the cursor — only the release handler should act.
+                # ──────────────────────────────────────────────────────────
+                drag_release_handled = False
                 if gesture != GestureType.PINCH_INDEX and self.was_pinching_index:
                     force_drop = (gesture == GestureType.NEUTRAL)
                     release_action = self.mouse.handle_pinch_release(
@@ -160,8 +117,76 @@ class VirtualMouseApp:
                     if release_action:
                         action_label = release_action
                     if not self.mouse.is_dragging:
+                        # Fully released (drop complete or click fired)
                         self.was_pinching_index = False
+                    else:
+                        # Still in grace period — block all other gesture handlers
+                        drag_release_handled = True
 
+                if not drag_release_handled:
+                    if gesture == GestureType.NEUTRAL:
+                        self.mouse.reset_all_states()
+                        self.system.reset_volume_anchor()
+                        self.system.reset_brightness_anchor()
+                        self.was_pinching_index = False
+                        action_label = "Neutral: Operations Cleared / Dropped"
+
+                    elif gesture == GestureType.MOVE:
+                        d_thumb_index = info.get("d_thumb_index", 999.0)
+                        self.mouse.move_cursor(ix, iy, pinch_distance=d_thumb_index)
+                        action_label = self.mouse.last_action_desc
+
+                    elif gesture == GestureType.PINCH_INDEX:
+                        self.was_pinching_index = True
+                        action_label = self.mouse.handle_pinch_index(ix, iy)
+
+                    elif gesture == GestureType.PINCH_MIDDLE:
+                        # Single Right Click
+                        action_label = self.mouse.handle_right_click()
+
+                    elif gesture == GestureType.SCROLL_DUAL:
+                        action_label = self.mouse.handle_scroll(ix, iy)
+                        if self.mouse.scroll_anchor:
+                            active_reticle = (
+                                self.mouse.scroll_anchor,
+                                (ix, iy),
+                                "Scroll",
+                                config.SCROLL_DEADZONE,
+                                "Tilt UP/DOWN to scroll continuously"
+                            )
+
+                    elif gesture == GestureType.MULTI_SELECT:
+                        action_label = self.mouse.set_multi_select(True, ix, iy)
+
+                    elif gesture == GestureType.VOLUME_CONTROL:
+                        # Continuous Rate-Based Volume Joystick
+                        vol, v_desc = self.system.adjust_volume_continuous(hx, hy)
+                        action_label = v_desc
+                        slider_info = ("VOLUME", int(vol), config.COLOR_SUCCESS)
+                        if self.system.volume_anchor:
+                            active_reticle = (
+                                self.system.volume_anchor,
+                                (hx, hy),
+                                "Volume",
+                                config.CONTROL_DEADZONE,
+                                "Tilt UP for Volume UP / DOWN for Volume DOWN"
+                            )
+
+                    elif gesture == GestureType.BRIGHTNESS_CONTROL:
+                        # Continuous Rate-Based Brightness Joystick
+                        bri, b_desc = self.system.adjust_brightness_continuous(hx, hy)
+                        action_label = b_desc
+                        slider_info = ("BRIGHTNESS", bri, config.COLOR_WARNING)
+                        if self.system.brightness_anchor:
+                            active_reticle = (
+                                self.system.brightness_anchor,
+                                (hx, hy),
+                                "Brightness",
+                                config.CONTROL_DEADZONE,
+                                "Tilt UP for Brightness UP / DOWN for Brightness DOWN"
+                            )
+
+                # Cleanup anchors when leaving specific modes
                 if gesture != GestureType.SCROLL_DUAL:
                     self.mouse.reset_scroll_anchor()
 
@@ -192,12 +217,19 @@ class VirtualMouseApp:
             self._draw_hud(frame, gesture_label, action_label, slider_info, active_reticle)
 
             # Display feed
-            cv2.imshow("Gesture-Controlled Virtual Mouse", frame)
+            cv2.imshow(self.win_name, frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), ord('Q'), 27):
                 logger.info("Exit key pressed by user.")
                 break
+            elif key in (ord('s'), ord('S')):
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                save_dir = config.PROJECT_ROOT / "assets" / "screenshots"
+                save_dir.mkdir(parents=True, exist_ok=True)
+                save_path = save_dir / f"screenshot_{timestamp}.png"
+                cv2.imwrite(str(save_path), frame)
+                logger.info(f"Screenshot saved: {save_path}")
 
     def _draw_hud(self, frame: cv2.Mat, gesture_name: str, action_desc: str,
                   slider_info: Optional[tuple], active_reticle: Optional[tuple] = None) -> None:
@@ -270,7 +302,7 @@ class VirtualMouseApp:
 
         # 6. Footer controls reminder
         if active_reticle is None and not self.mouse.is_dragging:
-            cv2.putText(frame, "Press 'Q' or 'Esc' to Exit", (20, h - 18),
+            cv2.putText(frame, "Press 'S' to Save Screenshot | 'Q' or 'Esc' to Exit", (20, h - 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
     def _cleanup(self) -> None:
